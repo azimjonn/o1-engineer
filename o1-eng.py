@@ -2,7 +2,6 @@ import os
 import fnmatch
 import logging
 import time
-from openai import OpenAI
 from termcolor import colored
 from prompt_toolkit import prompt
 from prompt_toolkit.styles import Style
@@ -13,11 +12,10 @@ from rich.console import Console
 import difflib
 import re
 
+# Removed OpenAI import and client initialization
+# from openai import OpenAI
 
 MODEL = "o1-mini"
-# Initialize OpenAI client
-client = OpenAI(api_key="YOUR KEY")
-
 
 CREATE_SYSTEM_PROMPT = """You are an advanced o1 engineer designed to create files and folders based on user instructions. Your primary objective is to generate the content of the files to be created as code blocks. Each code block should specify whether it's a file or folder, along with its path.
 
@@ -25,7 +23,7 @@ When given a user request, perform the following steps:
 
 1. Understand the User Request: Carefully interpret what the user wants to create.
 2. Generate Creation Instructions: Provide the content for each file to be created within appropriate code blocks. Each code block should begin with a special comment line that specifies whether it's a file or folder, along with its path.
-3. You create full functioning, complete,code files, not just snippets. No approximations or placeholders. FULL WORKING CODE.
+3. You create full functioning, complete, code files, not just snippets. No approximations or placeholders. FULL WORKING CODE.
 
 IMPORTANT: Your response must ONLY contain the code blocks with no additional text before or after. Do not use markdown formatting outside of the code blocks. Use the following format for the special comment line. Do not include any explanations, additional text:
 
@@ -124,10 +122,7 @@ APPLY_EDITS_PROMPT = """You are an advanced o1 engineer designed to apply edit i
 Your response must contain only the complete, updated content of the file. Do not include any explanations or additional text.
 YOU NEVER CREATE DUPLICATE CODE. MAKE SURE YOU DO NOT CREATE DUPLICATE CODE WHEN REWRITING THE NEW FILE"""
 
-
-
 PLANNING_PROMPT = """You are an AI planning assistant. Your task is to create a detailed plan based on the user's request. Consider all aspects of the task, break it down into steps, and provide a comprehensive strategy for accomplishment. Your plan should be clear, actionable, and thorough."""
-
 
 last_ai_response = None
 conversation_history = []
@@ -148,7 +143,6 @@ def is_binary_file(file_path):
         logging.error(f"Error reading file {file_path}: {e}")
         return True  # Assume binary if an error occurs
     return False  # File is likely text
-
 
 # Load .gitignore patterns if in a git repository
 def load_gitignore_patterns(directory):
@@ -205,8 +199,6 @@ def add_file_to_context(file_path, added_files, action='to the chat context'):
     else:
         print(colored(f"Error: {file_path} is not a file.", "red"))
         logging.error(f"{file_path} is not a file.")
-
-
 
 def apply_modifications(new_content, file_path):
     try:
@@ -318,7 +310,7 @@ def apply_creation_steps(creation_response, added_files, retry_count=0):
             logging.warning(f"Creation parsing failed: {str(e)}. Retrying... (Attempt {retry_count + 1})")
             error_message = f"{str(e)} Please provide the creation instructions again using the specified format."
             time.sleep(2 ** retry_count)  # Exponential backoff
-            new_response = chat_with_ai(error_message, is_edit_request=False, added_files=added_files)
+            new_response = read_ai_response()
             if new_response:
                 return apply_creation_steps(new_response, added_files, retry_count + 1)
             else:
@@ -333,8 +325,6 @@ def apply_creation_steps(creation_response, added_files, retry_count=0):
         print(colored(f"An unexpected error occurred during creation: {e}", "red"))
         logging.error(f"An unexpected error occurred during creation: {e}")
         return False
-
-
 
 def parse_edit_instructions(response):
     instructions = {}
@@ -360,10 +350,14 @@ def apply_edit_instructions(edit_instructions, original_files):
     for file_path, content in original_files.items():
         if file_path in edit_instructions:
             instructions = edit_instructions[file_path]
-            prompt = f"{APPLY_EDITS_PROMPT}\n\nOriginal File: {file_path}\nContent:\n{content}\n\nEdit Instructions:\n{instructions}\n\nUpdated File Content:"
-            response = chat_with_ai(prompt, is_edit_request=True)
-            if response:
-                modified_files[file_path] = response.strip()
+            # Write the APPLY_EDITS_PROMPT along with original content and instructions to the common prompt file
+            write_prompt_to_file(APPLY_EDITS_PROMPT, file_path, content, instructions)
+            print(colored(f"Edit prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
+            input(colored("After placing the AI's response in 'ai_response.txt', press Enter to continue...", "yellow"))
+            # Read the AI response
+            ai_response = read_ai_response()
+            if ai_response:
+                modified_files[file_path] = ai_response.strip()
         else:
             modified_files[file_path] = content  # No changes for this file
     return modified_files
@@ -391,43 +385,61 @@ def chat_with_ai(user_message, is_edit_request=False, retry_count=0, added_files
         else:
             message_content = user_message
 
-        messages = [
-            {"role": "user", "content": message_content}
-        ]
+        # Write the prompt to the common prompt file
+        with open('ai_prompt.txt', 'w', encoding='utf-8') as prompt_file:
+            prompt_file.write(message_content)
+        print(colored("Prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
         
-        if is_edit_request and retry_count == 0:
-            print(colored("Analyzing files and generating modifications...", "magenta"))
-            logging.info("Sending edit request to AI.")
-        elif not is_edit_request:
-            print(colored("o1 engineer is thinking...", "magenta"))
-            logging.info("Sending general query to AI.")
+        # Wait for the user to press Enter after providing the AI response
+        input(colored("After placing the AI's response in 'ai_response.txt', press Enter to continue...", "yellow"))
 
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            max_completion_tokens=60000
-        )
-        logging.info("Received response from AI.")
-        last_ai_response = response.choices[0].message.content
+        # Read the AI response
+        ai_response = read_ai_response()
 
-        if not is_edit_request:
-            # Update conversation history
-            conversation_history.append(user_message)
-            conversation_history.append(last_ai_response)
-            if len(conversation_history) > 20:  # 10 interactions (user + AI each)
-                conversation_history = conversation_history[-20:]
+        if ai_response:
+            last_ai_response = ai_response
 
-        return last_ai_response
+            if not is_edit_request:
+                # Update conversation history
+                conversation_history.append(user_message)
+                conversation_history.append(last_ai_response)
+                if len(conversation_history) > 20:  # 10 interactions (user + AI each)
+                    conversation_history = conversation_history[-20:]
+
+            return last_ai_response
+        else:
+            return None
     except Exception as e:
-        print(colored(f"Error while communicating with OpenAI: {e}", "red"))
-        logging.error(f"Error while communicating with OpenAI: {e}")
+        print(colored(f"Error while handling AI prompt/response files: {e}", "red"))
+        logging.error(f"Error while handling AI prompt/response files: {e}")
         return None
-    
 
+def write_prompt_to_file(prompt_template, file_path, content, instructions):
+    prompt_content = f"""{prompt_template}
+
+Original File: {file_path}
+Content:
+{content}
+
+Edit Instructions:
+{instructions}
+
+Updated File Content:"""
+    with open('ai_prompt.txt', 'w', encoding='utf-8') as prompt_file:
+        prompt_file.write(prompt_content)
+    print(colored(f"Edit prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
+
+def read_ai_response():
+    response_file = 'ai_response.txt'
+    if not os.path.exists(response_file):
+        print(colored(f"Error: {response_file} does not exist. Please provide the AI's response in this file.", "red"))
+        logging.error(f"{response_file} does not exist.")
+        return None
+    with open(response_file, 'r', encoding='utf-8') as file:
+        return file.read()
 
 def main():
     global last_ai_response, conversation_history
-
 
     print(colored("o1 engineer is ready to help you.", "cyan"))
     print("\nAvailable commands:")
@@ -535,8 +547,19 @@ Files to modify:
             for file_path, content in added_files.items():
                 edit_request += f"\nFile: {file_path}\nContent:\n{content}\n\n"
 
-            ai_response = chat_with_ai(edit_request, is_edit_request=True, added_files=added_files)
+            # Write the edit prompt to the common prompt file
+            with open('ai_prompt.txt', 'w', encoding='utf-8') as prompt_file:
+                prompt_file.write(f"{EDIT_INSTRUCTION_PROMPT}\n\nUser request: {edit_instruction}\n\nFiles to modify:\n")
+                for file_path, content in added_files.items():
+                    prompt_file.write(f"\nFile: {file_path}\nContent:\n{content}\n\n")
+            print(colored("Edit prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
             
+            # Wait for the user to press Enter after providing the AI response
+            input(colored("After placing the AI's response in 'ai_response.txt', press Enter to continue...", "yellow"))
+
+            # Read the AI response
+            ai_response = read_ai_response()
+
             if ai_response:
                 print("o1 engineer: Here are the suggested edit instructions:")
                 rprint(Markdown(ai_response))
@@ -558,9 +581,17 @@ Files to modify:
                 logging.warning("User issued /create without instructions.")
                 continue
 
-            create_request = f"{CREATE_SYSTEM_PROMPT}\n\nUser request: {creation_instruction}"
-            ai_response = chat_with_ai(create_request, is_edit_request=False, added_files=added_files)
+            # Write the creation prompt to the common prompt file
+            with open('ai_prompt.txt', 'w', encoding='utf-8') as prompt_file:
+                prompt_file.write(f"{CREATE_SYSTEM_PROMPT}\n\nUser request: {creation_instruction}")
+            print(colored("Creation prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
             
+            # Wait for the user to press Enter after providing the AI response
+            input(colored("After placing the AI's response in 'ai_response.txt', press Enter to continue...", "yellow"))
+
+            # Read the AI response
+            ai_response = read_ai_response()
+
             if ai_response:
                 while True:
                     print("o1 engineer: Here is the suggested creation structure:")
@@ -575,7 +606,15 @@ Files to modify:
                             retry = prompt("Creation failed. Do you want the AI to try again? (yes/no): ", style=style).strip().lower()
                             if retry != 'yes':
                                 break
-                            ai_response = chat_with_ai("The previous creation attempt failed. Please try again with a different approach.", is_edit_request=False, added_files=added_files)
+                            # Prompt for a new creation instruction
+                            new_instruction = prompt("Please provide a different creation instruction: ", style=style).strip()
+                            with open('ai_prompt.txt', 'w', encoding='utf-8') as prompt_file:
+                                prompt_file.write(f"{CREATE_SYSTEM_PROMPT}\n\nUser request: {new_instruction}")
+                            print(colored("New creation prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
+                            # Wait for the user to press Enter after providing the AI response
+                            input(colored("After placing the AI's response in 'ai_response.txt', press Enter to continue...", "yellow"))
+                            # Read the new AI response
+                            ai_response = read_ai_response()
                     else:
                         print(colored("Creation steps not executed.", "red"))
                         logging.info("User chose not to execute creation steps.")
@@ -591,14 +630,14 @@ Files to modify:
             file_contents = {}
             for path in paths:
                 if os.path.isfile(path):
-                    add_file_to_context(path, file_contents, action='to review')
+                    add_file_to_context(path, file_contents)
                 elif os.path.isdir(path):
                     for root, dirs, files_in_dir in os.walk(path):
                         # Skip excluded directories
                         dirs[:] = [d for d in dirs if d not in {'__pycache__', '.git', 'node_modules'}]
                         for file in files_in_dir:
                             file_path = os.path.join(root, file)
-                            add_file_to_context(file_path, file_contents, action='to review')
+                            add_file_to_context(file_path, file_contents)
                 else:
                     print(colored(f"Error: {path} is neither a file nor a directory.", "red"))
                     logging.error(f"{path} is neither a file nor a directory.")
@@ -607,13 +646,19 @@ Files to modify:
                 print(colored("No valid files to review.", "red"))
                 continue
 
-            review_request = f"{CODE_REVIEW_PROMPT}\n\nFiles to review:\n"
-            for file_path, content in file_contents.items():
-                review_request += f"\nFile: {file_path}\nContent:\n{content}\n\n"
-
-            print(colored("Analyzing code and generating review...", "magenta"))
-            ai_response = chat_with_ai(review_request, is_edit_request=False, added_files=added_files)
+            # Write the code review prompt to the common prompt file
+            with open('ai_prompt.txt', 'w', encoding='utf-8') as prompt_file:
+                prompt_file.write(f"{CODE_REVIEW_PROMPT}\n\nFiles to review:\n")
+                for file_path, content in file_contents.items():
+                    prompt_file.write(f"\nFile: {file_path}\nContent:\n{content}\n\n")
+            print(colored("Review prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
             
+            # Wait for the user to press Enter after providing the AI response
+            input(colored("After placing the AI's response in 'ai_response.txt', press Enter to continue...", "yellow"))
+
+            # Read the AI response
+            ai_response = read_ai_response()
+
             if ai_response:
                 print()
                 print(colored("Code Review:", "blue"))
@@ -626,26 +671,40 @@ Files to modify:
                 print(colored("Please provide a planning request after /planning.", "red"))
                 logging.warning("User issued /planning without instructions.")
                 continue
-            planning_request = f"{PLANNING_PROMPT}\n\nUser request: {planning_instruction}"
-            ai_response = chat_with_ai(planning_request, is_edit_request=False, added_files=added_files)
+            # Write the planning prompt to the common prompt file
+            with open('ai_prompt.txt', 'w', encoding='utf-8') as prompt_file:
+                prompt_file.write(f"{PLANNING_PROMPT}\n\nUser request: {planning_instruction}")
+            print(colored("Planning prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
+            
+            # Wait for the user to press Enter after providing the AI response
+            input(colored("After placing the AI's response in 'ai_response.txt', press Enter to continue...", "yellow"))
+
+            # Read the AI response
+            ai_response = read_ai_response()
+
             if ai_response:
                 print()
                 print(colored("o1 engineer: Here is your detailed plan:", "blue"))
                 rprint(Markdown(ai_response))
                 logging.info("Provided planning response to user.")
-            else:
-                print(colored("Failed to generate a planning response. Please try again.", "red"))
-                logging.error("AI failed to generate a planning response.")
 
         else:
-            ai_response = chat_with_ai(user_input, added_files=added_files)
+            # Handle general queries by writing to the common prompt file
+            with open('ai_prompt.txt', 'w', encoding='utf-8') as prompt_file:
+                prompt_file.write(user_input)
+            print(colored("General prompt written to 'ai_prompt.txt'. Please process it with ChatGPT and place the response in 'ai_response.txt', then press Enter to continue.", "cyan"))
+            
+            # Wait for the user to press Enter after providing the AI response
+            input(colored("After placing the AI's response in 'ai_response.txt', press Enter to continue...", "yellow"))
+
+            # Read the AI response
+            ai_response = read_ai_response()
+
             if ai_response:
                 print()
                 print(colored("o1 engineer:", "blue"))
                 rprint(Markdown(ai_response))
                 logging.info("Provided AI response to user query.")
-
-
 
 if __name__ == "__main__":
     main()
